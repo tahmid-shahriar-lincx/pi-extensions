@@ -58,5 +58,5 @@ if [ "$with_policy" -eq 1 ]; then
 fi
 
 say ""
-say "next:  pi install git:github.com/tahmid-shahriar-lincx/pi-extensions@v1.0.0"
+say "next:  pi install git:github.com/tahmid-shahriar-lincx/pi-extensions@v1.1.0"
 say "then restart pi and run /agents-list"

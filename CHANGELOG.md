@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [1.1.0] - 2026-11-04
 
 - `agent` tool: the main agent can dispatch to a roster specialist and gets the
   report back as the tool result. One run at a time; the task must be

@@ -15,7 +15,7 @@ Issuer: file the follow-up we spotted             ← this session or a hop
 ## Install
 
 ```sh
-pi install git:github.com/tahmid-shahriar-lincx/pi-extensions@v1.0.0
+pi install git:github.com/tahmid-shahriar-lincx/pi-extensions@v1.1.0
 bash ~/.pi/agent/git/github.com/tahmid-shahriar-lincx/pi-extensions/install.sh   # adds pi-hop
 ```
 
