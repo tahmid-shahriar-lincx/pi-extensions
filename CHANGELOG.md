@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.2.0] - 2026-11-04
+
+- Cards are a single line: status icon, name, then elapsed time and live `↓`/`↑`
+  tokens while a hop runs. Descriptions no longer have a caption line; they are
+  in `/agents-list`, along with the model, which is also on each report line.
+- The grid fills a row with as many cards as fit (22-column minimum), so a wide
+  terminal shows the whole team on one line.
+- No widget padding and no in-widget header: the widget is only the cards, and
+  the team/count/active text is the status line it already set.
+- `Main` card: the parent session now appears first in the grid and in
+  `/agents-list`, so a running turn is visible the same way a running hop is.
+  It tracks `agent_start` → `agent_settled` and is not an addressable agent.
+
 ## [1.1.0] - 2026-11-04
 
 - `agent` tool: the main agent can dispatch to a roster specialist and gets the

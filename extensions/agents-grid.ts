@@ -4,12 +4,19 @@
  * No subagent dependency: the main agent dispatches through the `agent` tool,
  * and every dispatch is a fresh-context headless `pi -p` child.
  *
- * Cards render as:
+ * Cards render on a single line; the name carries the role, so no caption:
  *
- *   ○ Reviewer                     idle, description underneath
- *   ● Coder 45s glm-5.3 ↓1.2k ↑3.4k Add retry…  running, live model + usage
- *   ✓ Reviewer 18s                 finished hop (flashes, then decays)
- *   ✗ Issuer                       failed hop
+ *   ○ Main                                this session, idle
+ *   ● Main 12s                            this session is running
+ *   ○ Reviewer                            idle
+ *   ● Coder 45s ↓1.2k ↑3.4k               running, live usage
+ *   ✓ Reviewer 18s                        finished (flashes, then decays)
+ *   ✗ Issuer                              failed
+ *
+ * `Main` is the parent session itself, prepended to every roster view. It is not
+ * an agent: it cannot be addressed, dispatched or team-gated. It flips to
+ * running on `agent_start` and to done on `agent_settled`, the final boundary
+ * that no retry, compaction or queued follow-up will cross.
  *
  * Dispatch:
  *   agent tool (main agent)              → fresh-context hop, report as result
@@ -20,7 +27,8 @@
  * Hop execution: `pi -ne --no-session --mode json` with `--tools`, `--model`
  * and `--thinking` taken from the agent file's frontmatter. Nothing else is
  * consulted, so an agent file fully describes its own hop. The child's JSON
- * event stream is folded while it runs, so a card shows model and live tokens.
+ * event stream is folded while it runs, so a card shows live tokens and elapsed
+ * time; the model appears in `/agents-list` and in the hop's report line.
  *
  * Teams: ~/.pi/agent/agents/teams.yaml (user) and <cwd>/.pi/agents/teams.yaml
  * (project wins on name clash). Members match agent `name` or `aliases`,
@@ -52,7 +60,7 @@ interface AgentDef {
 	name: string;
 	aliases: string[];
 	description: string;
-	source: "project" | "user" | "package";
+	source: "project" | "user" | "package" | "session";
 	file: string;
 	tools?: string;
 	model?: string;
@@ -62,8 +70,6 @@ interface AgentDef {
 interface CardState {
 	def: AgentDef;
 	status: "idle" | "running" | "done" | "error";
-	goal: string;
-	model: string; // the model the hop actually runs (agent file or parent)
 	inputTokens: number;
 	outputTokens: number;
 	costUsd: number;
@@ -91,6 +97,15 @@ type AgentFrontmatter = {
 
 // declared pipeline order; unknown agents keep relative (alphabetical) order
 const PIPELINE_ORDER = ["scout", "spotter", "planner", "coder", "simplifier", "reviewer", "issuer"];
+// The parent session is not a roster agent: it cannot be addressed, gated or
+// dispatched, it only reports whether this session is running right now.
+const MAIN_DEF: AgentDef = {
+	name: "main",
+	aliases: [],
+	description: "This session's agent — the one you are talking to",
+	source: "session",
+	file: "",
+};
 const TEAM_STATE_FILE = "teams.state.json";
 const DONE_FLASH_MS = 6000;
 const MAX_HOPS = 3;
@@ -386,6 +401,16 @@ function foldHopRecord(event: any, acc: HopResult, turns: HopResult): boolean {
 export default function agentsGrid(pi: ExtensionAPI) {
 	const cards = new Map<string, CardState>(); // key: agent name lowercase
 	const hops = new Map<string, Hop>(); // key: run key
+	const mainCard: CardState = {
+		def: MAIN_DEF,
+		status: "idle",
+		inputTokens: 0,
+		outputTokens: 0,
+		costUsd: 0,
+		startedAt: 0,
+		lastDoneAt: 0,
+		runCount: 0,
+	};
 	let explicitCols = 0; // 0 = auto
 	let widgetVisible = true;
 	let uiCtx: any;
@@ -404,8 +429,6 @@ export default function agentsGrid(pi: ExtensionAPI) {
 			card = {
 				def,
 				status: "idle",
-				goal: "",
-				model: "",
 				inputTokens: 0,
 				outputTokens: 0,
 				costUsd: 0,
@@ -553,16 +576,38 @@ export default function agentsGrid(pi: ExtensionAPI) {
 
 	function visibleCards(now: number): CardState[] {
 		if (activeTeam === "all") {
-			return pipelineSort(Array.from(cards.values()).map((c) => c.def))
+			const all = pipelineSort(Array.from(cards.values()).map((c) => c.def))
 				.map((d) => cards.get(d.name.toLowerCase())!)
 				.filter(Boolean);
+			return [mainCard, ...all];
 		}
 		const memberSet = new Set(teamCards);
 		const others = Array.from(cards.values()).filter(
 			(c) => !memberSet.has(c) && (c.runCount > 0 || effectiveStatus(c, now) === "running"),
 		);
-		return [...teamCards, ...others];
+		return [mainCard, ...teamCards, ...others];
 	}
+
+	// ── Main session activity ─────────────────────
+	// `agent_start` opens a run and `agent_settled` is the final boundary: no
+	// retry, compaction or queued follow-up will continue it after that.
+
+	pi.on("agent_start", async () => {
+		mainCard.status = "running";
+		mainCard.runCount = 1;
+		mainCard.startedAt = Date.now();
+		render();
+		updateStatusLine();
+	});
+
+	pi.on("agent_settled", async () => {
+		if (mainCard.runCount === 0) return;
+		mainCard.runCount = 0;
+		mainCard.status = "done";
+		mainCard.lastDoneAt = Date.now();
+		render();
+		updateStatusLine();
+	});
 
 	// ── Hop execution ─────────────────────────────
 
@@ -639,9 +684,7 @@ export default function agentsGrid(pi: ExtensionAPI) {
 
 		hops.set(key, { agent: def.name.toLowerCase(), startedAt, controller });
 		card.status = "running";
-		card.model = model;
 		card.startedAt = startedAt;
-		card.goal = task.replace(/\s+/g, " ").trim();
 		card.runCount += 1;
 		card.inputTokens = 0;
 		card.outputTokens = 0;
@@ -744,8 +787,8 @@ export default function agentsGrid(pi: ExtensionAPI) {
 	// Compact two-line card:
 	//   ● Reviewer 45s
 	//   ↓1.2k ↑3.4k Review authentication bounda…
-	function renderCard(card: CardState, colWidth: number, theme: Theme, now: number): string[] {
-		const w = Math.max(12, colWidth);
+	function renderCard(card: CardState, colWidth: number, theme: Theme, now: number): string {
+		const w = Math.max(10, colWidth);
 		const status = effectiveStatus(card, now);
 
 		const statusColor = status === "idle" ? "dim" : status === "running" ? "accent" : status === "done" ? "success" : "error";
@@ -759,73 +802,63 @@ export default function agentsGrid(pi: ExtensionAPI) {
 				: (status === "done" || status === "error") && card.lastDoneAt && card.startedAt
 					? ` ${fmtElapsed(Math.max(0, card.lastDoneAt - card.startedAt))}`
 					: "";
+		const live =
+			status !== "idle" && (card.inputTokens || card.outputTokens)
+				? ` ↓${fmtTokens(card.inputTokens)}↑${fmtTokens(card.outputTokens)}`
+				: "";
 
-		const namePlain = `${name}${count}${elapsed}`;
-		const nameBudget = w - 4; // icon + spaces
-		const nameStr = truncate(namePlain, nameBudget);
-		const line1 =
+		const namePart = truncate(`${name}${count}`, Math.max(4, w - 2));
+		let budget = w - 2 - visibleWidth(namePart);
+		const livePart = live && visibleWidth(live) <= budget ? live : "";
+		budget -= visibleWidth(livePart);
+		const elapsedPart = visibleWidth(elapsed) <= budget ? elapsed : "";
+
+		const nameBold = namePart.slice(0, Math.min(name.length, namePart.length));
+		const line =
 			theme.fg(statusColor as any, statusIcon) +
 			" " +
-			theme.fg("accent", theme.bold(nameStr.slice(0, Math.min(name.length, nameStr.length)))) +
-			theme.fg("dim", nameStr.slice(Math.min(name.length, nameStr.length)));
-		const line1Pad = " ".repeat(Math.max(0, w - 2 - visibleWidth(nameStr)));
-
-		let workStr: string;
-		const model = shortModel(card.model);
-		if (status === "running" || ((card.inputTokens || card.outputTokens) && status !== "idle")) {
-			const live = [model, `↓${fmtTokens(card.inputTokens)} ↑${fmtTokens(card.outputTokens)}`].filter(Boolean).join(" ");
-			const goal = card.goal || card.def.description;
-			workStr = goal ? `${live} ${truncate(goal, Math.max(1, w - live.length - 1))}` : live;
-		} else {
-			workStr = status === "idle" ? card.def.description : [model, card.goal || card.def.description].filter(Boolean).join(" ");
-		}
-		const line2 = theme.fg("muted", truncate(workStr, w));
-		const line2Pad = " ".repeat(Math.max(0, w - visibleWidth(truncate(workStr, w))));
-
-		return [line1 + line1Pad, line2 + line2Pad];
+			theme.fg("accent", theme.bold(nameBold)) +
+			theme.fg("dim", namePart.slice(nameBold.length)) +
+			theme.fg("muted", elapsedPart + livePart);
+		const pad = " ".repeat(Math.max(0, w - 2 - visibleWidth(namePart) - visibleWidth(elapsedPart + livePart)));
+		return line + pad;
 	}
 
 	function render() {
 		if (!widgetVisible || !uiCtx || uiCtx.mode !== "tui") return;
 		uiCtx.ui.setWidget("agents-grid", (_tui: any, theme: Theme) => {
-			const text = new Text("", 0, 1);
+			const text = new Text("", 0, 0);
 			return {
 				render(width: number): string[] {
-					if (cards.size === 0) {
-						text.setText(theme.fg("dim", "No agents found. Add .md files to agents/, .pi/agents/ or ~/.pi/agent/agents/"));
-						return text.render(width);
-					}
-
 					const now = Date.now();
 					const list = visibleCards(now);
 					const MAX_SHOWN = 24;
 					const shown = list.length > MAX_SHOWN ? list.slice(0, MAX_SHOWN) : list;
 
-					// fit columns to width: widest grid that keeps cards ≥ 22 cols
-					let cols =
-						explicitCols || (shown.length <= 3 ? Math.max(1, shown.length) : shown.length <= 8 ? Math.min(3, shown.length) : 4);
+					// single-line cards: fill the row, keeping cards ≥ 22 cols
+					let cols = explicitCols || shown.length;
 					while (cols > 1 && (width - 2 * (cols - 1)) / cols < 22) cols--;
 					cols = Math.max(1, Math.min(cols, shown.length));
 
 					const gap = 2;
 					const colWidth = Math.floor((width - gap * (cols - 1)) / cols);
-					const header =
-						theme.fg("dim", `${activeTeam} · ${list.length} agent${list.length === 1 ? "" : "s"} · `) +
-						theme.fg("accent", `${list.filter((c) => c.runCount > 0 || effectiveStatus(c, now) === "running").length} active`);
 
-					const lines: string[] = [header];
+					// the active team and run count live in the status line, so the
+					// widget is only the cards
+					const lines: string[] = [];
+					if (cards.size === 0) {
+						lines.push(theme.fg("dim", "No roster agents found. Add .md files to agents/, .pi/agents/ or ~/.pi/agent/agents/"));
+					}
 					for (let i = 0; i < shown.length; i += cols) {
 						const rowCards = shown.slice(i, i + cols);
 						const cells = rowCards.map((c) => renderCard(c, colWidth, theme, now));
-						while (cells.length < cols) cells.push(["", ""]);
-						for (let l = 0; l < 2; l++) {
-							lines.push(
-								cells
-									.map((cell) => (cell[l] || "").padEnd(colWidth))
-									.join(" ".repeat(gap))
-									.trimEnd(),
-							);
-						}
+						while (cells.length < cols) cells.push("");
+						lines.push(
+							cells
+								.map((cell) => cell.padEnd(colWidth))
+								.join(" ".repeat(gap))
+								.trimEnd(),
+						);
 					}
 
 					if (list.length > shown.length) lines.push(theme.fg("dim", ` … +${list.length - shown.length} more`));
@@ -844,7 +877,7 @@ export default function agentsGrid(pi: ExtensionAPI) {
 		const now = Date.now();
 		const visible = visibleCards(now);
 		const active = visible.filter((c) => c.runCount > 0 || effectiveStatus(c, now) === "running").length;
-		uiCtx.ui.setStatus("agents-grid", `${activeTeam} · ${visible.length} agents · ${active} active`);
+		uiCtx.ui.setStatus("agents-grid", `${activeTeam} · ${visible.length - 1} agents · ${active} active`);
 	}
 
 	// ── Heartbeat ──────────────────────────────────

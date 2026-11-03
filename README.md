@@ -15,7 +15,7 @@ Issuer: file the follow-up we spotted             ← this session or a hop
 ## Install
 
 ```sh
-pi install git:github.com/tahmid-shahriar-lincx/pi-extensions@v1.1.0
+pi install git:github.com/tahmid-shahriar-lincx/pi-extensions@v1.2.0
 bash ~/.pi/agent/git/github.com/tahmid-shahriar-lincx/pi-extensions/install.sh   # adds pi-hop
 ```
 
@@ -65,9 +65,18 @@ contract, tools, model and thinking. Nothing runs inside the current session.
 | `/agents-hop reviewer review HEAD` | hop without typing a prefix |
 | `/agents-stop` | SIGTERM running hops |
 
-While a hop runs the card shows the live model plus `↓`/`↑` tokens, folded from
-the child's `--mode json` stream; the tool result carries the same numbers in
-its details. From any shell:
+Cards are one line — status icon, agent name, and (while a hop runs) elapsed
+time plus live `↓`/`↑` tokens folded from the child's `--mode json` stream.
+`Main` is prepended to every view: it is the session you are talking to, so a
+running parent turn (`● Main 12s`) is as visible as a running hop. It is not an
+agent — it cannot be addressed, dispatched or team-gated. There
+is no caption line and no widget padding: the widget is only the cards, and the
+team/count/active text is the status line. Rows fill with as many cards as fit
+(22-column minimum), so a 200-column terminal shows seven agents on one line.
+Descriptions and models live in `/agents-list`; the model is also on each hop's
+report line, and the tool result carries the token numbers in its details.
+
+From any shell:
 
 ```sh
 pi-hop reviewer "review HEAD vs origin/main"      # answer on stdout

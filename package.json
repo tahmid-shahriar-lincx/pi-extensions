@@ -1,6 +1,6 @@
 {
   "name": "pi-extensions",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Pi extension package: the agents grid (sequential agent team, roster, fresh-context hops) with its agent contracts.",
   "keywords": [
     "pi-package",
