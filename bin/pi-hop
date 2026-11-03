@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# pi-hop — run one agent as a fresh-context hop and print its final message.
+#
+#   pi-hop reviewer "review the auth change on this branch"
+#   pi-hop coder    "add the retry cap described in docs/retry.md"
+#   git push  # …with this in .git/hooks/pre-push:  exec pi-hop reviewer "review HEAD"
+#
+# Agent lookup order: .pi/agents, agents, .claude/agents, $PI_CODING_AGENT_DIR
+# (default ~/.pi/agent)/agents, then <repo>/agents next to this script (so a
+# symlinked checkout works).
+#
+# The agent definition supplies the contract and the routing:
+#   tools:    → pi --tools   (the child cannot use anything else)
+#   model:    → pi --model
+#   thinking: → pi --thinking
+# Everything below the frontmatter is the prompt. Stdout is the answer; nothing
+# else is written, so it composes with pipes and CI.
+#
+# Env: PI_HOP_BIN (default: pi), PI_HOP_EXTRA ("--no-context-files …" etc.)
+
+set -euo pipefail
+
+agent=${1:-}
+task=${2:-}
+if [ -z "$agent" ] || [ -z "$task" ]; then
+	printf 'usage: pi-hop <agent> "<task>"\n' >&2
+	exit 2
+fi
+
+file=""
+here=$(dirname "$(readlink -f "$0")")
+agent_dir=${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}
+for candidate in \
+	"$PWD/.pi/agents/$agent.md" \
+	"$PWD/agents/$agent.md" \
+	"$PWD/.claude/agents/$agent.md" \
+	"$agent_dir/agents/$agent.md" \
+	"$here/../agents/$agent.md"; do
+	if [ -f "$candidate" ]; then
+		file=$candidate
+		break
+	fi
+done
+if [ -z "$file" ]; then
+	printf 'pi-hop: no agent definition for %s (looked in .pi/agents, agents, .claude/agents, %s, %s)\n' "$agent" "$agent_dir/agents" "$here/../agents" >&2
+	exit 2
+fi
+
+frontmatter=$(awk 'NR==1 && /^---[[:space:]]*$/{f=1; next} f && /^---[[:space:]]*$/{exit} f' "$file")
+field() { printf '%s\n' "$frontmatter" | sed -n "s/^$1:[[:space:]]*//p" | head -1; }
+contract=$(awk '/^---[[:space:]]*$/{n++; next} n>=2' "$file")
+
+if [ -z "$contract" ]; then
+	printf 'pi-hop: %s has no prompt body below its frontmatter\n' "$file" >&2
+	exit 2
+fi
+
+tools=$(field tools)
+model=$(field model)
+thinking=$(field thinking)
+
+prompt=$(printf '%s\n\n---\n\n# Task\n\n%s\n\nWork in the current directory (%s). Report your result as your final message.\n' \
+	"$contract" "$task" "$PWD")
+
+args=(-ne --no-session)
+[ -n "$model" ] && args+=(--model "$model")
+[ -n "$thinking" ] && args+=(--thinking "$thinking")
+[ -n "$tools" ] && args+=(--tools "$tools")
+# shellcheck disable=SC2206 # PI_HOP_EXTRA is intentionally word-split
+[ -n "${PI_HOP_EXTRA:-}" ] && args+=($PI_HOP_EXTRA)
+
+exec "${PI_HOP_BIN:-pi}" "${args[@]}" -p "$prompt" </dev/null

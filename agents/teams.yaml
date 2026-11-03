@@ -1,0 +1,12 @@
+# Teams for extensions/agents-grid.ts. Members match an agent's `name` or one
+# of its `aliases` in ~/.pi/agent/agents/*.md. `all` is always available and
+# applies no gate. A named team limits who may be addressed; anything outside
+# it is refused with a warning instead of launched. /agents-team switches.
+lincx:
+  - scout
+  - spotter
+  - planner
+  - coder
+  - simplifier
+  - reviewer
+  - issuer

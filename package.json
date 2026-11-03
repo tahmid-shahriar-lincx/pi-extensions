@@ -1,0 +1,15 @@
+{
+  "name": "pi-lincx-team",
+  "version": "1.0.0",
+  "description": "Sequential agent team for Pi: roster grid, per-agent contracts, and fresh-context hops.",
+  "keywords": ["pi-package", "pi-extension", "agents", "team", "grid"],
+  "license": "MIT",
+  "pi": {
+    "extensions": ["./extensions/agents-grid.ts"],
+    "changelogPath": "./CHANGELOG.md"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  }
+}

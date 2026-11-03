@@ -1,0 +1,7 @@
+# per-machine state
+agents/teams.state.json
+teams.state.json
+.DS_Store
+
+# package-manager artifacts
+node_modules
