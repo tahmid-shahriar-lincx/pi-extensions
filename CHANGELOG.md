@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- All seven contracts carry a `Read Discipline` block: locate with `grep -n` and
+  read by range, read a file end to end only when changing it, cap command
+  output at the source, and stay out of `node_modules`, `.git`, `dist`,
+  `build`, `coverage` and `vendor`. Orientation reads were the largest cost in
+  a hop.
+- README: the opening example no longer claims in-session runs, and the roster
+  precedence now lists every scanned source in the order the extension
+  resolves it (closes #1).
+
 ## [1.2.0] - 2026-11-04
 
 - Cards are a single line: status icon, name, then elapsed time and live `↓`/`↑`
