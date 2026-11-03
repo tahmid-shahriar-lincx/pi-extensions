@@ -1,11 +1,19 @@
 {
-  "name": "pi-lincx-team",
+  "name": "pi-extensions",
   "version": "1.0.0",
-  "description": "Sequential agent team for Pi: roster grid, per-agent contracts, and fresh-context hops.",
-  "keywords": ["pi-package", "pi-extension", "agents", "team", "grid"],
+  "description": "Pi extension package: the agents grid (sequential agent team, roster, fresh-context hops) with its agent contracts.",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "agents",
+    "team",
+    "grid"
+  ],
   "license": "MIT",
   "pi": {
-    "extensions": ["./extensions/agents-grid.ts"],
+    "extensions": [
+      "./extensions/agents-grid.ts"
+    ],
     "changelogPath": "./CHANGELOG.md"
   },
   "peerDependencies": {

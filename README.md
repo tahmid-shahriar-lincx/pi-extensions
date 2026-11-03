@@ -1,4 +1,4 @@
-# pi-lincx-team
+# pi-extensions
 
 A sequential agent team for [Pi](https://pi.dev): a roster grid, seven agent
 contracts, per-agent model/tool routing, and fresh-context hops. No `subagent`
@@ -15,8 +15,8 @@ Issuer: file the follow-up we spotted             ← this session or a hop
 ## Install
 
 ```sh
-pi install git:github.com/<owner>/pi-lincx-team@v1.0.0
-bash ~/.pi/agent/git/github.com/<owner>/pi-lincx-team/install.sh   # adds pi-hop
+pi install git:github.com/tahmid-shahriar-lincx/pi-extensions@v1.0.0
+bash ~/.pi/agent/git/github.com/tahmid-shahriar-lincx/pi-extensions/install.sh   # adds pi-hop
 ```
 
 Restart Pi, then `/agents-list` and `/agents-grid 3`.
@@ -39,10 +39,10 @@ the branch instead, at the cost of unpinned surprises.
 ### Without the package (dotfiles style)
 
 ```sh
-git clone git@github.com:<owner>/pi-lincx-team.git ~/src/pi-lincx-team
-cp ~/src/pi-lincx-team/extensions/agents-grid.ts ~/.pi/agent/extensions/
-cp ~/src/pi-lincx-team/agents/*.md ~/.pi/agent/agents/
-bash ~/src/pi-lincx-team/install.sh
+git clone git@github.com:tahmid-shahriar-lincx/pi-extensions.git ~/src/pi-extensions
+cp ~/src/pi-extensions/extensions/agents-grid.ts ~/.pi/agent/extensions/
+cp ~/src/pi-extensions/agents/*.md ~/.pi/agent/agents/
+bash ~/src/pi-extensions/install.sh
 ```
 
 Copying the `.md` files into `~/.pi/agent/agents/` makes them *user* agents,
