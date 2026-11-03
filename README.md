@@ -5,12 +5,15 @@ contracts, per-agent model/tool routing, and fresh-context hops. No `subagent`
 tool, no orchestration framework — you route, it executes.
 
 ```
-Scout: map the auth token flow                    ← runs in this session
-Planner: plan the retry cap using those findings  ← runs in this session
-Coder: implement the plan                         ← runs in this session
-Reviewer! git diff                                ← fresh-context hop
-Issuer: file the follow-up we spotted             ← this session or a hop
+Scout: map the auth token flow                    ← hop: fresh context
+Planner: plan the retry cap using those findings  ← hop: fresh context
+Coder: implement the plan                         ← hop: fresh context
+Reviewer! git diff                                ← hop: fresh context
+Issuer: file the follow-up we spotted             ← hop: fresh context
 ```
+
+Each of those lines starts its own run with a fresh context and returns a
+report as a follow-up. Nothing runs in the session you typed in.
 
 ## Install
 
@@ -98,6 +101,11 @@ routing lives in the contract, not in your settings file.
 | `reviewer` | severity-led review, reports only | glm-5.3 (high) | read, bash, grep, find, ls |
 | `issuer` | file issues / open PRs | deepseek-flash | read, grep, find, ls, bash |
 
+Every contract also carries a `## Read Discipline` block — find with `grep -n`
+and read by range, read a file end to end only when changing it, cap command
+output at the source, and stay out of `node_modules`, `.git`, `dist`, `build`,
+`coverage` and `vendor`. Orientation reads were the biggest cost in a hop.
+
 Edit an agent by editing its markdown. **Frontmatter** carries identity and
 routing (`name`, `description`, `aliases`, `tools`, `model`, `thinking`); the
 **body** is the contract. Body edits apply on the next message; frontmatter
@@ -115,9 +123,11 @@ install.sh         links pi-hop (and optionally AGENTS.user.md)
 
 ## Precedence
 
-Roster (first match wins, flat scan): `.pi/agents/` in the cwd → `~/.pi/agent/agents/`
-→ this package's `agents/`. Teams: this package's `teams.yaml` → user
-`~/.pi/agent/agents/teams.yaml` → project `.pi/agents/teams.yaml`.
+Roster (first match wins, flat scan): `agents/` in the cwd → `.claude/agents/`
+in the cwd → `.pi/agents/` in the cwd → `~/.pi/agent/agents/` → this package's
+`agents/`. A name found earlier wins; a project directory therefore overrides
+your user agents and the package defaults. Teams: this package's `teams.yaml` →
+user `~/.pi/agent/agents/teams.yaml` → project `.pi/agents/teams.yaml`.
 
 A named team is a gate: addressing an agent outside it is refused with a
 warning instead of launched. `teams.state.json` (which team you last picked) is
