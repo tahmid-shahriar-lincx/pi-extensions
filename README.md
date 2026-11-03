@@ -22,7 +22,7 @@ bash ~/.pi/agent/git/github.com/tahmid-shahriar-lincx/pi-extensions/install.sh  
 Restart Pi, then `/agents-list` and `/agents-grid 3`.
 
 `install.sh` only links `bin/pi-hop` into `~/.local/bin`. Add `--with-policy`
-if you also want this repo's `AGENTS.md` linked as `~/.pi/agent/AGENTS.md`
+if you also want this repo's `AGENTS.user.md` linked as `~/.pi/agent/AGENTS.md`
 (backed up first). The extension and the agents need no linking: Pi clones the
 series into `~/.pi/agent/git/<host>/<owner>/<repo>` and the extension scans the
 `agents/` directory sitting next to it.
@@ -50,18 +50,24 @@ which outrank package agents — useful when you want to fork a contract locally
 
 ## Usage
 
+Every run is a fresh-context hop: a headless `pi -p` child with that agent's
+contract, tools, model and thinking. Nothing runs inside the current session.
+
 | You type | What happens |
 |---|---|
-| `Reviewer: check the auth change` | the `reviewer` contract runs in the current session |
-| `Reviewer! check the auth change` | headless `pi -p` child with that contract; answer arrives as a follow-up |
+| `agent({ agent: "reviewer", task: "…" })` | the main agent dispatches a hop; the report is the tool result |
+| `Reviewer: check the auth change` | same hop, started by hand; answer arrives as a follow-up |
+| `Reviewer! check the auth change` | identical — `!` is kept for muscle memory |
 | `Approacher: size this up` | alias → `planner` |
 | `/agents-list` | roster with model, thinking, tools, source |
 | `/agents-grid 3` | pin 3 columns (`1`-`6`, `off`, `on`) |
 | `/agents-team` | switch team; `all` removes the gate |
-| `/agents-hop reviewer review HEAD` | hop without the `!` syntax |
+| `/agents-hop reviewer review HEAD` | hop without typing a prefix |
 | `/agents-stop` | SIGTERM running hops |
 
-From any shell:
+While a hop runs the card shows the live model plus `↓`/`↑` tokens, folded from
+the child's `--mode json` stream; the tool result carries the same numbers in
+its details. From any shell:
 
 ```sh
 pi-hop reviewer "review HEAD vs origin/main"      # answer on stdout
@@ -94,8 +100,8 @@ edits on the next 30-second roster refresh.
 agents/            seven contracts + teams.yaml (the team definition)
 extensions/        agents-grid.ts — roster, teams, hops (no dependencies)
 bin/pi-hop         one-hop CLI for shells, hooks and CI
-AGENTS.md          optional user policy describing the pipeline
-install.sh         links pi-hop (and optionally AGENTS.md)
+AGENTS.user.md     optional user policy describing the pipeline
+install.sh         links pi-hop (and optionally AGENTS.user.md)
 ```
 
 ## Precedence
@@ -110,6 +116,8 @@ per machine and deliberately git-ignored.
 
 ## Requirements
 
-Pi ≥ 1.5.0. Hops shell out to the `pi` binary on `PATH` (override with
-`PI_HOP_BIN`), cap at 3 concurrent runs, and time out after 20 minutes
-(`PI_HOP_TIMEOUT_MS`).
+Pi ≥ 1.5.0. The extension registers an `agent` tool, so Pi must supply
+`typebox` (it does) and the extension needs the host peer packages listed in
+`package.json`. Hops shell out to the `pi` binary on `PATH` (override with
+`PI_HOP_BIN`), cap at 3 concurrent runs, run one at a time, and time out after
+20 minutes (`PI_HOP_TIMEOUT_MS`).

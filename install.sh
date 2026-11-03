@@ -2,7 +2,7 @@
 # install.sh — link the pieces a Pi package cannot install by itself.
 #
 #   bash install.sh                 # link bin/pi-hop into ~/.local/bin
-#   bash install.sh --with-policy   # also adopt AGENTS.md as the user policy
+#   bash install.sh --with-policy   # also adopt AGENTS.user.md as the user policy
 #   bash install.sh --bin ~/bin     # different bin directory
 #
 # The extension and the agents need no linking: `pi install <this-repo>` puts
@@ -53,8 +53,8 @@ if [ "$with_policy" -eq 1 ]; then
 		cp "$agent_dir/AGENTS.md" "$backup"
 		say "backed up existing policy → $backup"
 	fi
-	ln -sfn "$root/AGENTS.md" "$agent_dir/AGENTS.md"
-	say "linked $agent_dir/AGENTS.md → $root/AGENTS.md"
+	ln -sfn "$root/AGENTS.user.md" "$agent_dir/AGENTS.md"
+	say "linked $agent_dir/AGENTS.md → $root/AGENTS.user.md"
 fi
 
 say ""

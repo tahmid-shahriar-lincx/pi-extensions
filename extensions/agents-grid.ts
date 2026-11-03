@@ -1,25 +1,26 @@
 /**
  * Agents Grid — standalone agent roster, teams and sequential hops.
  *
- * No dependency on pi-subagents and no `subagent` tool: the grid is the UI, and
- * every execution path is either this session or a headless `pi -p` child.
+ * No subagent dependency: the main agent dispatches through the `agent` tool,
+ * and every dispatch is a fresh-context headless `pi -p` child.
  *
  * Cards render as:
  *
  *   ○ Reviewer                     idle, description underneath
- *   ● Coder 45s ↓1.2k ↑3.4k Add retry…  running hop, elapsed + tokens
+ *   ● Coder 45s glm-5.3 ↓1.2k ↑3.4k Add retry…  running, live model + usage
  *   ✓ Reviewer 18s                 finished hop (flashes, then decays)
  *   ✗ Issuer                       failed hop
  *
- * Addressing (typed in the editor):
- *   Reviewer: check the auth change      → run the contract in THIS session
- *   Reviewer! check the auth change      → fresh-context hop (headless pi)
+ * Dispatch:
+ *   agent tool (main agent)              → fresh-context hop, report as result
+ *   Reviewer: / Reviewer! <task>         → the same hop, typed by hand
  * The hop's answer arrives as a follow-up message; the parent never pays for
  * the child's exploration, only for the report.
  *
  * Hop execution: `pi -ne --no-session --mode json` with `--tools`, `--model`
  * and `--thinking` taken from the agent file's frontmatter. Nothing else is
- * consulted, so an agent file fully describes its own hop.
+ * consulted, so an agent file fully describes its own hop. The child's JSON
+ * event stream is folded while it runs, so a card shows model and live tokens.
  *
  * Teams: ~/.pi/agent/agents/teams.yaml (user) and <cwd>/.pi/agents/teams.yaml
  * (project wins on name clash). Members match agent `name` or `aliases`,
@@ -32,17 +33,18 @@
  *   /agents-team                 switch active team (persisted)
  *   /agents-grid [1-6|off|on]    set column count (default auto), toggle widget
  *   /agents-list                 list the visible roster with sources
- *   /agents-hop <agent> <task>   run a fresh-context hop without the ! syntax
+ *   /agents-hop <agent> <task>   run a fresh-context hop without a prefix
  *   /agents-stop [agent|all]     abort running hops
  */
 
-import { execFile } from "node:child_process";
+import { spawn } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getAgentDir, parseFrontmatter, type ExtensionAPI, type Theme } from "@earendil-works/pi-coding-agent";
 import { Text, visibleWidth } from "@earendil-works/pi-tui";
 import type { AutocompleteItem } from "@earendil-works/pi-tui";
+import { Type } from "typebox";
 
 // ── Types ────────────────────────────────────────
 
@@ -61,6 +63,7 @@ interface CardState {
 	def: AgentDef;
 	status: "idle" | "running" | "done" | "error";
 	goal: string;
+	model: string; // the model the hop actually runs (agent file or parent)
 	inputTokens: number;
 	outputTokens: number;
 	costUsd: number;
@@ -93,7 +96,7 @@ const DONE_FLASH_MS = 6000;
 const MAX_HOPS = 3;
 const HOP_TIMEOUT_MS = Number(process.env.PI_HOP_TIMEOUT_MS ?? 20 * 60 * 1000);
 const HOP_BIN = process.env.PI_HOP_BIN ?? "pi";
-const HOP_MAX_BUFFER = 64 * 1024 * 1024;
+const LIVE_RENDER_MS = 120;
 
 // ── Roster helpers ───────────────────────────────
 
@@ -242,86 +245,140 @@ function truncate(s: string, max: number): string {
 	return s.length > max ? s.slice(0, Math.max(0, max - 1)) + "…" : s;
 }
 
+/** Bare model id for the card: `zai-coding-cn/glm-5.3` → `glm-5.3`. */
+function shortModel(model: string): string {
+	const trimmed = model.trim();
+	if (!trimmed) return "";
+	return trimmed.split("/").filter(Boolean).pop() ?? trimmed;
+}
+
+/** Case/space/hyphen insensitive key for agent-name matching. */
+function normalizeName(value: string): string {
+	return value.toLowerCase().replace(/[ _.-]/g, "");
+}
+
 // ── Hop process ──────────────────────────────────
 
 interface ChildResult {
-	stdout: string;
-	stderr: string;
 	code: number;
 	killed: boolean;
+	timedOut: boolean;
+	aborted: boolean;
+	stderr: string;
 }
 
 /**
- * Run the hop child with stdin closed immediately. A headless `pi -p` blocks
- * while stdin is an open pipe, so the parent has to end it right after spawn;
- * without that the child never exits and the hop looks hung.
+ * Run a hop child and hand every `pi --mode json` record to `onRecord` while it
+ * runs. stdin is `ignore`: a headless `pi -p` blocks while stdin is an open
+ * pipe, so the parent never opens one. Records are newline-delimited JSON; a
+ * torn line is dropped rather than parsed.
  */
-function runChild(
+function spawnHop(
 	bin: string,
 	args: string[],
-	options: { cwd: string; timeout: number; signal: AbortSignal; maxBuffer: number },
+	options: { cwd: string; timeout: number; signal: AbortSignal },
+	onRecord: (event: any) => void,
 ): Promise<ChildResult> {
 	return new Promise((resolvePromise) => {
-		const child = execFile(
-			bin,
-			args,
-			{ cwd: options.cwd, timeout: options.timeout, maxBuffer: options.maxBuffer },
-			(err: any, stdout, stderr) => {
-				const missing = err?.code === "ENOENT";
-				resolvePromise({
-					stdout: String(stdout ?? ""),
-					stderr: missing ? `cannot run \`${bin}\` (not found on PATH)` : String(stderr ?? ""),
-					code: err ? (typeof err.code === "number" ? err.code : 1) : 0,
-					killed: Boolean(err?.killed),
-				});
-			},
-		);
-		child.stdin?.end();
-		const onAbort = () => child.kill("SIGTERM");
+		const child = spawn(bin, args, { cwd: options.cwd, stdio: ["ignore", "pipe", "pipe"] });
+		let stderr = "";
+		let timedOut = false;
+		let aborted = false;
+		let settled = false;
+
+		const timer = setTimeout(() => {
+			timedOut = true;
+			child.kill("SIGTERM");
+		}, options.timeout);
+		const onAbort = () => {
+			aborted = true;
+			child.kill("SIGTERM");
+		};
 		options.signal.addEventListener("abort", onAbort, { once: true });
-		child.on("exit", () => options.signal.removeEventListener("abort", onAbort));
+
+		const finish = (code: number) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			options.signal.removeEventListener("abort", onAbort);
+			resolvePromise({ code, killed: timedOut || aborted, timedOut, aborted, stderr });
+		};
+
+		let buffer = "";
+		child.stdout?.setEncoding("utf-8");
+		child.stdout?.on("data", (chunk: string) => {
+			buffer += chunk;
+			let newline = buffer.indexOf("\n");
+			while (newline !== -1) {
+				const line = buffer.slice(0, newline).trim();
+				buffer = buffer.slice(newline + 1);
+				newline = buffer.indexOf("\n");
+				if (!line.startsWith("{")) continue;
+				try {
+					onRecord(JSON.parse(line));
+				} catch {
+					/* incomplete or non-JSON record */
+				}
+			}
+			if (buffer.length > 8 * 1024 * 1024) buffer = ""; // runaway single line
+		});
+
+		child.stderr?.setEncoding("utf-8");
+		child.stderr?.on("data", (chunk: string) => {
+			stderr += chunk;
+			if (stderr.length > 64 * 1024) stderr = stderr.slice(-64 * 1024);
+		});
+
+		child.on("error", (err: any) => {
+			stderr = err?.code === "ENOENT" ? `cannot run \`${bin}\` (not found on PATH)` : stderr || String(err?.message ?? err);
+			finish(1);
+		});
+		child.on("close", (code) => finish(typeof code === "number" ? code : 1));
 	});
 }
 
-// ── Hop result parsing ───────────────────────────
+// ── Live hop state ───────────────────────────────
 
 interface HopResult {
 	text: string;
-	input: number;
+	input: number; // live total: finished turns + the in-flight message
 	output: number;
 	cost: number;
 }
 
-/** Read `pi --mode json` output: final assistant text plus cumulative usage. */
-function parseHopJson(stdout: string): HopResult {
-	let text = "";
-	let input = 0;
-	let output = 0;
-	let cost = 0;
-	for (const line of stdout.split("\n")) {
-		const trimmed = line.trim();
-		if (!trimmed.startsWith("{")) continue;
-		let event: any;
-		try {
-			event = JSON.parse(trimmed);
-		} catch {
-			continue;
-		}
-		if (event?.type === "turn_end" && event.message?.usage) {
-			input += Number(event.message.usage.input ?? 0) || 0;
-			output += Number(event.message.usage.output ?? 0) || 0;
-			cost += Number(event.message.usage.cost?.total ?? 0) || 0;
-		}
-		if (event?.type === "message_end" && event.message?.role === "assistant" && Array.isArray(event.message.content)) {
-			const messageText = event.message.content
-				.filter((part: any) => part?.type === "text" && typeof part.text === "string")
-				.map((part: any) => part.text as string)
-				.join("")
-				.trim();
-			if (messageText) text = messageText;
-		}
+/**
+ * Fold one `pi --mode json` record into the hop state. `message_update.usage`
+ * is cumulative for the *current* message only, so live totals are the finished
+ * turns plus that message; `turn_end` commits the turn and resets the window.
+ * See docs/json.md (message_update, turn_end, message_end).
+ */
+function foldHopRecord(event: any, acc: HopResult, turns: HopResult): boolean {
+	const usage = event?.usage ?? event?.message?.usage;
+	if (event?.type === "message_update" && usage) {
+		acc.input = turns.input + (Number(usage.input) || 0);
+		acc.output = turns.output + (Number(usage.output) || 0);
+		acc.cost = turns.cost + (Number(usage.cost?.total) || 0);
+		return true;
 	}
-	return { text, input, output, cost };
+	if (event?.type === "turn_end" && usage) {
+		turns.input += Number(usage.input) || 0;
+		turns.output += Number(usage.output) || 0;
+		turns.cost += Number(usage.cost?.total) || 0;
+		acc.input = turns.input;
+		acc.output = turns.output;
+		acc.cost = turns.cost;
+		return true;
+	}
+	if (event?.type === "message_end" && event.message?.role === "assistant" && Array.isArray(event.message.content)) {
+		const messageText = event.message.content
+			.filter((part: any) => part?.type === "text" && typeof part.text === "string")
+			.map((part: any) => part.text as string)
+			.join("")
+			.trim();
+		if (messageText) acc.text = messageText;
+		return true;
+	}
+	return false;
 }
 
 // ── Extension ────────────────────────────────────
@@ -348,6 +405,7 @@ export default function agentsGrid(pi: ExtensionAPI) {
 				def,
 				status: "idle",
 				goal: "",
+				model: "",
 				inputTokens: 0,
 				outputTokens: 0,
 				costUsd: 0,
@@ -461,6 +519,27 @@ export default function agentsGrid(pi: ExtensionAPI) {
 		}
 	}
 
+	/** Resolve a typed name / alias / display name to a roster entry. */
+	function resolveAgent(name: string): AgentDef | undefined {
+		const trimmed = String(name ?? "").trim();
+		if (!trimmed) return undefined;
+		const direct = resolver.get(trimmed.toLowerCase());
+		if (direct) return direct;
+		const wanted = normalizeName(trimmed);
+		let best: AgentDef | undefined;
+		let bestLen = -1;
+		for (const def of allDefs) {
+			for (const candidate of [def.name, displayName(def.name), ...def.aliases]) {
+				if (normalizeName(candidate) !== wanted) continue;
+				if (candidate.length > bestLen) {
+					best = def;
+					bestLen = candidate.length;
+				}
+			}
+		}
+		return best;
+	}
+
 	// ── Visible cards ─────────────────────────────
 
 	// done/error flashes decay to idle after the window (hops have no external
@@ -519,23 +598,48 @@ export default function agentsGrid(pi: ExtensionAPI) {
 		}
 	}
 
-	async function startHop(def: AgentDef, task: string, ctx: any) {
-		if (teamRefusal(def)) {
-			ctx.ui.notify(teamRefusal(def)!, "warning");
-			return;
+	interface HopOutcome {
+		ok: boolean;
+		result: HopResult;
+		failure: string;
+		elapsedMs: number;
+	}
+
+	function modelOf(def: AgentDef, ctx: any): string {
+		if (def.model) return def.model;
+		const model = ctx?.model;
+		if (!model) return "";
+		return model.provider ? `${model.provider}/${model.id ?? model.name ?? ""}` : String(model.id ?? model.name ?? "");
+	}
+
+	async function startHop(
+		def: AgentDef,
+		task: string,
+		ctx: any,
+		options: { signal?: AbortSignal; deliver?: boolean; onProgress?: (result: HopResult, elapsedMs: number) => void } = {},
+	): Promise<HopOutcome> {
+		const result: HopResult = { text: "", input: 0, output: 0, cost: 0 };
+		const refusal = teamRefusal(def);
+		if (refusal) {
+			ctx?.ui?.notify(refusal, "warning");
+			return { ok: false, result, failure: refusal, elapsedMs: 0 };
 		}
 		if (hops.size >= MAX_HOPS) {
-			ctx.ui.notify(`Too many hops running (${hops.size}). /agents-stop stops one.`, "warning");
-			return;
+			const busy = `Too many hops running (${hops.size}). /agents-stop stops one.`;
+			ctx?.ui?.notify(busy, "warning");
+			return { ok: false, result, failure: busy, elapsedMs: 0 };
 		}
 
 		const key = `${def.name.toLowerCase()}-${Date.now()}`;
 		const controller = new AbortController();
 		const card = ensureCard(def);
 		const startedAt = Date.now();
+		const turns: HopResult = { text: "", input: 0, output: 0, cost: 0 };
+		const model = modelOf(def, ctx);
 
 		hops.set(key, { agent: def.name.toLowerCase(), startedAt, controller });
 		card.status = "running";
+		card.model = model;
 		card.startedAt = startedAt;
 		card.goal = task.replace(/\s+/g, " ").trim();
 		card.runCount += 1;
@@ -545,22 +649,44 @@ export default function agentsGrid(pi: ExtensionAPI) {
 		render();
 		updateStatusLine();
 
-		let result: HopResult = { text: "", input: 0, output: 0, cost: 0 };
+		if (options.signal) {
+			if (options.signal.aborted) controller.abort();
+			else options.signal.addEventListener("abort", () => controller.abort(), { once: true });
+		}
+
+		let lastLiveRender = 0;
 		let failed = false;
 		let failure = "";
 
 		try {
-			const res = await runChild(HOP_BIN, hopArgs(def, hopPrompt(def, task)), {
-				cwd: ctx.cwd ?? process.cwd(),
-				signal: controller.signal,
-				timeout: HOP_TIMEOUT_MS,
-				maxBuffer: HOP_MAX_BUFFER,
-			});
-			result = parseHopJson(res.stdout ?? "");
-			if (res.killed) {
+			const res = await spawnHop(
+				HOP_BIN,
+				hopArgs(def, hopPrompt(def, task)),
+				{ cwd: ctx?.cwd ?? process.cwd(), timeout: HOP_TIMEOUT_MS, signal: controller.signal },
+				(event) => {
+					if (!foldHopRecord(event, result, turns)) return;
+					card.inputTokens = result.input;
+					card.outputTokens = result.output;
+					card.costUsd = result.cost;
+					const now = Date.now();
+					if (event.type === "turn_end" || now - lastLiveRender >= LIVE_RENDER_MS) {
+						lastLiveRender = now;
+						render();
+						updateStatusLine();
+					}
+					if (event.type === "turn_end") options.onProgress?.({ ...result }, now - startedAt);
+				},
+			);
+			card.inputTokens = result.input;
+			card.outputTokens = result.output;
+			card.costUsd = result.cost;
+			if (res.aborted) {
 				failed = true;
-				failure = controller.signal.aborted ? "stopped" : "timed out or hit the output limit";
-			} else if ((res.code ?? 0) !== 0) {
+				failure = "stopped";
+			} else if (res.timedOut) {
+				failed = true;
+				failure = `timed out after ${fmtElapsed(HOP_TIMEOUT_MS)}`;
+			} else if (res.code !== 0) {
 				failed = true;
 				const stderr = (res.stderr ?? "").trim().split("\n").slice(-3).join("\n");
 				failure = `exit ${res.code}${stderr ? `\n${stderr}` : ""}`;
@@ -583,17 +709,25 @@ export default function agentsGrid(pi: ExtensionAPI) {
 			updateStatusLine();
 		}
 
-		const elapsed = fmtElapsed(Date.now() - startedAt);
+		const elapsedMs = Date.now() - startedAt;
+		const outcome: HopOutcome = { ok: !failed, result, failure, elapsedMs };
+
+		// The tool path returns the report to the caller; only a hand-typed
+		// dispatch injects a follow-up message into this session.
+		if (options.deliver === false) return outcome;
+
+		const elapsed = fmtElapsed(elapsedMs);
 		const tokens = result.input || result.output ? ` · ↓${fmtTokens(result.input)} ↑${fmtTokens(result.output)}` : "";
-		const meta = `${displayName(def.name)} hop · ${elapsed}${tokens}${fmtCost(result.cost)}`;
+		const label = model ? ` · ${shortModel(model)}` : "";
+		const meta = `${displayName(def.name)} hop · ${elapsed}${tokens}${fmtCost(result.cost)}${label}`;
 
 		if (failed) {
 			inject(`**${meta}** — failed: ${failure}`, false);
-			return;
+			return outcome;
 		}
 		inject(`**${meta}**\n\n${result.text}`, true);
+		return outcome;
 	}
-
 	function stopHops(target: string | undefined, ctx: any) {
 		const wanted = target?.trim().toLowerCase();
 		let stopped = 0;
@@ -637,12 +771,13 @@ export default function agentsGrid(pi: ExtensionAPI) {
 		const line1Pad = " ".repeat(Math.max(0, w - 2 - visibleWidth(nameStr)));
 
 		let workStr: string;
+		const model = shortModel(card.model);
 		if (status === "running" || ((card.inputTokens || card.outputTokens) && status !== "idle")) {
-			const tok = `↓${fmtTokens(card.inputTokens)} ↑${fmtTokens(card.outputTokens)}`;
+			const live = [model, `↓${fmtTokens(card.inputTokens)} ↑${fmtTokens(card.outputTokens)}`].filter(Boolean).join(" ");
 			const goal = card.goal || card.def.description;
-			workStr = goal ? `${tok} ${truncate(goal, Math.max(1, w - tok.length - 1))}` : tok;
+			workStr = goal ? `${live} ${truncate(goal, Math.max(1, w - live.length - 1))}` : live;
 		} else {
-			workStr = status === "idle" ? card.def.description : card.goal || card.def.description;
+			workStr = status === "idle" ? card.def.description : [model, card.goal || card.def.description].filter(Boolean).join(" ");
 		}
 		const line2 = theme.fg("muted", truncate(workStr, w));
 		const line2Pad = " ".repeat(Math.max(0, w - visibleWidth(truncate(workStr, w))));
@@ -718,6 +853,7 @@ export default function agentsGrid(pi: ExtensionAPI) {
 		tick += 1;
 		if (tick % 30 === 0 && uiCtx) loadRoster(uiCtx.cwd); // pick up new agent/team files
 		render(); // tick elapsed timers
+		updateStatusLine();
 	}, 1000);
 
 	// ── Commands ───────────────────────────────────
@@ -819,7 +955,7 @@ export default function agentsGrid(pi: ExtensionAPI) {
 				ctx.ui.notify("Usage: /agents-hop <agent> <task>", "error");
 				return;
 			}
-			const def = resolver.get(match[1].toLowerCase());
+			const def = resolveAgent(match[1]);
 			if (!def) {
 				ctx.ui.notify(`Unknown agent "${match[1]}". /agents-list shows the roster.`, "error");
 				return;
@@ -843,40 +979,125 @@ export default function agentsGrid(pi: ExtensionAPI) {
 		},
 	});
 
-	// ── Direct Addressing ────────────────────────
-	// "Scout: map token handling"    → run the contract in this session
-	// "Reviewer! review the diff"    → fresh-context hop, result delivered later
-	// Matches any roster agent by name, alias, or display name (case/space/
-	// hyphen-insensitive). Never fires on steering input; unknown prefixes
-	// ("Note: ...") pass through untouched.
+	// ── Tool dispatch ─────────────────────────────
+	// The main agent calls `agent`; the roster entry supplies contract, tools,
+	// model and thinking, and the child is a fresh-context `pi -p` process.
+
+	interface ToolHopDetails {
+		ok: boolean;
+		running: boolean;
+		agent: string;
+		model: string;
+		input: number;
+		output: number;
+		cost: number;
+		elapsedMs: number;
+		failure: string | undefined;
+	}
+
+	function toolHopDetails(
+		def: AgentDef,
+		model: string,
+		state: { ok: boolean; running: boolean; result?: HopResult; elapsedMs: number; failure?: string },
+	): ToolHopDetails {
+		return {
+			ok: state.ok,
+			running: state.running,
+			agent: def.name,
+			model: shortModel(model),
+			input: state.result?.input ?? 0,
+			output: state.result?.output ?? 0,
+			cost: state.result?.cost ?? 0,
+			elapsedMs: state.elapsedMs,
+			failure: state.failure,
+		};
+	}
+
+	pi.registerTool({
+		name: "agent",
+		label: "Agent",
+		description:
+			"Dispatch a task to a specialist agent from the roster. It runs in a fresh context with that agent's own tools and model and returns its final report.",
+		promptSnippet: "Run a specialist agent in a fresh context",
+		promptGuidelines: [
+			"Use agent for work that belongs to a specialist on the roster (scout, spotter, planner, coder, simplifier, reviewer, issuer).",
+			"agent starts with an empty context: put every path, constraint and expected output into the task text.",
+		],
+		executionMode: "sequential",
+		parameters: Type.Object({
+			agent: Type.String({ description: "Agent name or alias from the roster, e.g. scout or reviewer" }),
+			task: Type.String({ description: "Self-contained instruction; the agent cannot see this conversation" }),
+		}),
+		async execute(_toolCallId, params, signal, onUpdate, ctx) {
+			uiCtx = ctx ?? uiCtx;
+			const wanted = String((params as any).agent ?? "");
+			const def = resolveAgent(wanted);
+			if (!def) {
+				const roster = allDefs.map((d) => d.name).join(", ") || "(none)";
+				const failure = `Unknown agent "${wanted}"`;
+				return {
+					content: [{ type: "text", text: `${failure}. Roster: ${roster}` }],
+					details: {
+						ok: false,
+						running: false,
+						agent: wanted,
+						model: "",
+						input: 0,
+						output: 0,
+						cost: 0,
+						elapsedMs: 0,
+						failure,
+					} satisfies ToolHopDetails,
+					isError: true,
+				};
+			}
+			const name = displayName(def.name);
+			const model = modelOf(def, ctx);
+			const outcome = await startHop(def, String((params as any).task ?? ""), ctx, {
+				signal,
+				deliver: false,
+				onProgress: (result, elapsedMs) => {
+					onUpdate?.({
+						content: [
+							{
+								type: "text",
+								text: `${name} working · ${fmtElapsed(elapsedMs)} · ↓${fmtTokens(result.input)} ↑${fmtTokens(result.output)}`,
+							},
+						],
+						details: toolHopDetails(def, model, { ok: false, running: true, result, elapsedMs }),
+					});
+				},
+			});
+			return {
+				content: [{ type: "text", text: outcome.ok ? outcome.result.text : `${name} failed: ${outcome.failure}` }],
+				details: toolHopDetails(def, model, {
+					ok: outcome.ok,
+					running: false,
+					result: outcome.result,
+					elapsedMs: outcome.elapsedMs,
+					failure: outcome.failure || undefined,
+				}) satisfies ToolHopDetails,
+				isError: !outcome.ok,
+			};
+		},
+	});
+
+	// ── Hand-typed dispatch ───────────────────────
+	// "Reviewer: review the diff" and "Reviewer! review the diff" both start a
+	// fresh-context hop; nothing runs in this session. Unknown prefixes
+	// ("Note: ...") pass through untouched. Steering dispatches the same way.
 
 	pi.on("input", async (event, ctx) => {
 		if (!(event.source === "interactive" || event.source === "rpc")) return undefined;
-		if (event.streamingBehavior === "steer") return undefined;
 
-		const hopMatch = event.text.match(/^([A-Za-z][A-Za-z -]*?)!\s+([\s\S]+)$/);
-		const inlineMatch = hopMatch ? null : event.text.match(/^([A-Za-z][A-Za-z -]*?):\s+([\s\S]+)$/);
-		const match = hopMatch ?? inlineMatch;
+		const match = event.text.match(/^([A-Za-z][A-Za-z -]*?)\s*[:!]\s+([\s\S]+)$/);
 		if (!match) return undefined;
 
 		const task = match[2].trim();
 		if (!task) return undefined;
 
-		const normalize = (s: string) => s.toLowerCase().replace(/[ -]/g, "");
-		const prefix = normalize(match[1]);
-		let best: AgentDef | undefined;
-		let bestLen = -1;
-		for (const def of allDefs) {
-			for (const name of [def.name, displayName(def.name), ...def.aliases]) {
-				if (prefix !== normalize(name)) continue;
-				if (name.length > bestLen) {
-					best = def;
-					bestLen = name.length;
-				}
-			}
-		}
-		if (!best) return undefined;
-		const addressed = best;
+		const addressed = resolveAgent(match[1]);
+		if (!addressed) return undefined;
 
 		const refusal = teamRefusal(addressed);
 		if (refusal) {
@@ -884,21 +1105,9 @@ export default function agentsGrid(pi: ExtensionAPI) {
 			return { action: "handled" as const };
 		}
 
-		if (hopMatch) {
-			void startHop(addressed, task, ctx);
-			ctx.ui.notify(`${displayName(addressed.name)} hop started — result arrives as a follow-up`, "info");
-			return { action: "handled" as const };
-		}
-
-		return {
-			action: "transform" as const,
-			text:
-				`Act as the "${addressed.name}" specialist for this task and do the work yourself. ` +
-				`Follow the contract below exactly; it replaces your default workflow for this task. ` +
-				`Do not dispatch to another agent and do not hand the task back.\n\n` +
-				`<contract agent="${addressed.name}">\n${loadAgentBody(addressed)}\n</contract>\n\n` +
-				`<task>\n${task}\n</task>`,
-		};
+		void startHop(addressed, task, ctx);
+		ctx.ui.notify(`${displayName(addressed.name)} hop started — result arrives as a follow-up`, "info");
+		return { action: "handled" as const };
 	});
 
 	// ── Lifecycle ──────────────────────────────────
